@@ -28,6 +28,23 @@ if is_tty && have_cmd tput; then
   c_cyan="$(tput setaf 6 || true)"
 fi
 
+# Graceful exit on Ctrl+C / termination (better UX, avoids half-printed screens)
+on_abort() {
+  printf '\n' >&2
+  log_warn "Aborted by user."
+  exit 130
+}
+trap on_abort INT TERM
+
+# Show a friendly error on unexpected failures (network ops should not fail silently)
+on_err() {
+  local exit_code=$?
+  log_err "Unexpected error (exit=$exit_code)."
+  log_err "Tip: run with 'bash -x bin/menu.sh' for debugging, or use 'bin/netopt' CLI directly."
+  exit "$exit_code"
+}
+trap on_err ERR
+
 hr() { printf '%s\n' "${c_dim}----------------------------------------${c_reset}"; }
 title() { printf '%s%s%s\n' "$c_bold" "$*" "$c_reset"; }
 
@@ -49,11 +66,45 @@ die() { log_err "$*"; exit 1; }
 
 run_cmd() { "$@"; }
 
+sudo_refresh() {
+  # Pre-warm sudo to avoid prompt in the middle of applying network changes
+  if is_root; then
+    return 0
+  fi
+  if ! have_cmd sudo; then
+    die "sudo is required for this action, but not found."
+  fi
+  if ! sudo -v; then
+    die "sudo authentication failed."
+  fi
+}
+
 run_root() {
+  # Generic sudo runner (kept for non-netopt usage)
   if is_root; then
     "$@"
   else
+    sudo_refresh
     sudo -E -- "$@"
+  fi
+}
+
+run_netopt_root() {
+  # Always run netopt with sudo if needed AND handle missing executable bit.
+  require_repo
+  if is_root; then
+    if [[ -x "$NETOPT_BIN" ]]; then
+      "$NETOPT_BIN" "$@"
+    else
+      bash "$NETOPT_BIN" "$@"
+    fi
+  else
+    sudo_refresh
+    if [[ -x "$NETOPT_BIN" ]]; then
+      sudo -E -- "$NETOPT_BIN" "$@"
+    else
+      sudo -E -- bash "$NETOPT_BIN" "$@"
+    fi
   fi
 }
 
@@ -201,6 +252,16 @@ pick_qdisc() {
 # -------------------------
 # Rendering
 # -------------------------
+get_host() { hostname 2>/dev/null || echo "unknown"; }
+get_user() { id -un 2>/dev/null || echo "unknown"; }
+get_time() { date -Is 2>/dev/null || date; }
+
+get_git_rev() {
+  if have_cmd git && [[ -d "$ROOT_DIR/.git" ]]; then
+    git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true
+  fi
+}
+
 header() {
   clear_screen
   printf '%s\n' "${c_blue}${c_bold}"
@@ -212,23 +273,72 @@ header() {
 |_| \_|\___|\__|_|    \__,_|\__|
 EOF
   printf '%s\n' "${c_reset}"
+
+  local rev=""
+  rev="$(get_git_rev)"
   printf '%sLinux Network Optimizer%s  %s(menu)%s\n' "$c_bold" "$c_reset" "$c_dim" "$c_reset"
   printf '%sRepo:%s %s\n' "$c_dim" "$c_reset" "$REPO_HINT"
+  printf '%sHost:%s %s  %sUser:%s %s  %sTime:%s %s\n' \
+    "$c_dim" "$c_reset" "$(get_host)" \
+    "$c_dim" "$c_reset" "$(get_user)" \
+    "$c_dim" "$c_reset" "$(get_time)"
+  if [[ -n "${rev:-}" ]]; then
+    printf '%sCommit:%s %s\n' "$c_dim" "$c_reset" "$rev"
+  fi
+
   hr
   deps_summary
   hr
 }
 
+get_iface_state() {
+  local iface="$1"
+  cat "/sys/class/net/$iface/operstate" 2>/dev/null || echo "unknown"
+}
+
+get_iface_mtu() {
+  local iface="$1"
+  cat "/sys/class/net/$iface/mtu" 2>/dev/null || echo "unknown"
+}
+
+get_iface_speed_mbps() {
+  # Works on many NICs; on virtual NICs it may be missing
+  local iface="$1"
+  local sp
+  sp="$(cat "/sys/class/net/$iface/speed" 2>/dev/null || true)"
+  [[ -n "${sp:-}" && "$sp" != "-1" ]] && echo "${sp}Mb/s" || echo "n/a"
+}
+
+get_iface_ip4() {
+  local iface="$1"
+  if have_cmd ip; then
+    ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | head -n 1 || true
+  fi
+}
+
 show_quick_status() {
-  local iface cc qdisc kernel
+  local iface cc qdisc kernel ip4 state mtu speed
   iface="$(detect_iface)"
   cc="$(get_tcp_cc)"
   qdisc="$(get_qdisc_line "$iface")"
   kernel="$(get_kernel)"
 
+  ip4="$(get_iface_ip4 "$iface")"
+  state="$(get_iface_state "$iface")"
+  mtu="$(get_iface_mtu "$iface")"
+  speed="$(get_iface_speed_mbps "$iface")"
+
   title "Quick status"
   printf '  kernel : %s\n' "$kernel"
   printf '  iface  : %s\n' "$iface"
+  printf '  state  : %s\n' "$state"
+  printf '  mtu    : %s\n' "$mtu"
+  printf '  speed  : %s\n' "$speed"
+  if [[ -n "${ip4:-}" ]]; then
+    printf '  ip4    : %s\n' "$ip4"
+  else
+    printf '  ip4    : (none)\n'
+  fi
   printf '  tcp_cc : %s\n' "$cc"
   if [[ -n "${qdisc:-}" ]]; then
     printf '  qdisc  : %s\n' "$qdisc"
@@ -280,8 +390,24 @@ action_apply() {
   fi
 
   log_info "Applying tuning (requires sudo)..."
-  run_root "$NETOPT_BIN" apply --profile "$profile" --qdisc "$qdisc" --iface "$iface"
-  log_ok "Apply completed."
+  if run_netopt_root apply --profile "$profile" --qdisc "$qdisc" --iface "$iface"; then
+    log_ok "Apply completed."
+  else
+    log_err "Apply failed."
+    log_err "Recommendation: run 'bin/netopt rollback --latest' to revert, or check logs/backups."
+    return 1
+  fi
+
+  # Lightweight verification (network engineer-friendly, not noisy)
+  hr
+  log_info "Verify (post-apply):"
+  if have_cmd sysctl; then
+    printf '  tcp_cc : %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")"
+  fi
+  if have_cmd tc; then
+    printf '  qdisc  : %s\n' "$(tc qdisc show dev "$iface" 2>/dev/null | head -n 1 || echo "(no data)")"
+  fi
+  hr
 }
 
 action_show_qdisc() {
@@ -303,20 +429,55 @@ action_backups() {
 }
 
 action_rollback_latest() {
+  local iface
+  iface="$(detect_iface)"
+
   hr
   log_warn "Rollback will revert sysctl/qdisc changes from the latest backup."
   if ! confirm "Proceed to ROLLBACK latest backup?"; then
     log_warn "Rollback cancelled."
     return 0
   fi
+
   log_info "Rolling back (requires sudo)..."
-  run_root "$NETOPT_BIN" rollback --latest
-  log_ok "Rollback completed."
+  if run_netopt_root rollback --latest; then
+    log_ok "Rollback completed."
+  else
+    log_err "Rollback failed."
+    return 1
+  fi
+
+  hr
+  log_info "Verify (post-rollback):"
+  if have_cmd sysctl; then
+    printf '  tcp_cc : %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")"
+  fi
+  if have_cmd tc; then
+    printf '  qdisc  : %s\n' "$(tc qdisc show dev "$iface" 2>/dev/null | head -n 1 || echo "(no data)")"
+  fi
+  hr
 }
 
 action_snapshot() {
+  local iface
+  iface="$(detect_iface)"
+
   hr
-  run_netopt qdisc show
+  log_info "Snapshot:"
+  printf '  kernel : %s\n' "$(get_kernel)"
+  printf '  iface  : %s\n' "$iface"
+
+  if have_cmd tc; then
+    printf '  qdisc  : %s\n' "$(tc qdisc show dev "$iface" 2>/dev/null | head -n 1 || echo "(no data)")"
+  fi
+
+  if have_cmd sysctl; then
+    # minimal, high-signal sysctls for server workloads
+    printf '  tcp_cc : %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")"
+    printf '  somaxconn : %s\n' "$(sysctl -n net.core.somaxconn 2>/dev/null || echo "n/a")"
+    printf '  rmem_max  : %s\n' "$(sysctl -n net.core.rmem_max 2>/dev/null || echo "n/a")"
+    printf '  wmem_max  : %s\n' "$(sysctl -n net.core.wmem_max 2>/dev/null || echo "n/a")"
+  fi
   hr
 }
 
