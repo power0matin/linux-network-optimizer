@@ -43,5 +43,5 @@ list_backups() {
     echo "No backups found."
     return 0
   fi
-  ls -1 "$NETOPT_BACKUP_DIR" | sort || true
+  find "$NETOPT_BACKUP_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort || true
 }

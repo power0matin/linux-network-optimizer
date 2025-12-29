@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-NETOPT_VERSION="1.0.0"
+# NETOPT_VERSION="1.0.0"  # remove if unused
 NETOPT_STATE_DIR="${NETOPT_STATE_DIR:-/var/lib/netopt}"
 NETOPT_BACKUP_DIR="${NETOPT_BACKUP_DIR:-$NETOPT_STATE_DIR/backups}"
 NETOPT_SYSCTL_DROPIN="${NETOPT_SYSCTL_DROPIN:-/etc/sysctl.d/99-netopt.conf}"
