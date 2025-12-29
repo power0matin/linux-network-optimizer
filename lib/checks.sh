@@ -5,7 +5,7 @@ set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 
 print_header() {
-  echo "NetOpt v$NETOPT_VERSION"
+  # echo "NetOpt v$NETOPT_VERSION"
   echo "----------------------------------------"
 }
 
