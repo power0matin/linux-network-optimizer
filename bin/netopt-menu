@@ -9,6 +9,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETOPT_BIN="$ROOT_DIR/bin/netopt"
 REPO_HINT="$ROOT_DIR"
 
+# Branding
+APP_NAME="NetOpt"
+APP_TITLE="NetOpt (menu)"
+
 # -------------------------
 # UI / UX helpers
 # -------------------------
@@ -337,7 +341,7 @@ EOF
 
   local rev=""
   rev="$(get_git_rev)"
-  printf '%sLinux Network Optimizer%s  %s(menu)%s\n' "$c_bold" "$c_reset" "$c_dim" "$c_reset"
+  printf '%s%s%s\n' "$c_bold" "$APP_TITLE" "$c_reset"
   printf '%sRepo:%s %s\n' "$c_dim" "$c_reset" "$REPO_HINT"
   printf '%sHost:%s %s  %sUser:%s %s  %sTime:%s %s\n' \
     "$c_dim" "$c_reset" "$(get_host)" \
@@ -386,7 +390,7 @@ parse_args() {
       --verbose) MENU_VERBOSE=1; shift ;;
       --help|-h)
         cat <<EOF
-Linux Network Optimizer (menu)
+${APP_TITLE}
 Usage:
   bin/menu.sh [--verbose]
 
