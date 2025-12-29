@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Interactive menu for Linux Network Optimizer
-# Runs on an already-cloned repo (recommended under /opt/linux-network-optimizer)
+# Linux Network Optimizer - Interactive Menu
+# Intended for already-cloned repo (e.g. /opt/linux-network-optimizer)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETOPT_BIN="$ROOT_DIR/bin/netopt"
+REPO_HINT="$ROOT_DIR"
 
-# --- basic UI helpers ---
+# -------------------------
+# UI / UX helpers
+# -------------------------
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-is_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
+is_tty()   { [[ -t 1 ]]; }
+is_root()  { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
 
-c_reset="" c_bold="" c_dim="" c_red="" c_green="" c_yellow="" c_blue=""
-if have_cmd tput; then
+# Colors only when TTY + tput available
+c_reset="" c_bold="" c_dim="" c_red="" c_green="" c_yellow="" c_blue="" c_cyan=""
+if is_tty && have_cmd tput; then
   c_reset="$(tput sgr0 || true)"
   c_bold="$(tput bold || true)"
   c_dim="$(tput dim || true)"
@@ -20,179 +25,328 @@ if have_cmd tput; then
   c_green="$(tput setaf 2 || true)"
   c_yellow="$(tput setaf 3 || true)"
   c_blue="$(tput setaf 4 || true)"
+  c_cyan="$(tput setaf 6 || true)"
 fi
 
-pause() { read -r -p "Press Enter to continue... " _; }
+hr() { printf '%s\n' "${c_dim}----------------------------------------${c_reset}"; }
+title() { printf '%s%s%s\n' "$c_bold" "$*" "$c_reset"; }
 
-die() {
-  printf '%sERROR:%s %s\n' "$c_red" "$c_reset" "$*" >&2
-  exit 1
+log_info()  { printf '%s[INFO]%s %s\n'  "$c_cyan"  "$c_reset" "$*"; }
+log_ok()    { printf '%s[OK]%s   %s\n'  "$c_green" "$c_reset" "$*"; }
+log_warn()  { printf '%s[WARN]%s %s\n'  "$c_yellow" "$c_reset" "$*"; }
+log_err()   { printf '%s[ERR]%s  %s\n'  "$c_red"   "$c_reset" "$*" >&2; }
+
+pause() {
+  # Always read from TTY to avoid piping issues
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Press Enter to continue... " _ </dev/tty || true
+  else
+    read -r -p "Press Enter to continue... " _ || true
+  fi
 }
 
-ensure_root() {
-  if ! is_root; then
-    exec sudo -E bash "$0"
+die() { log_err "$*"; exit 1; }
+
+run_cmd() { "$@"; }
+
+run_root() {
+  if is_root; then
+    "$@"
+  else
+    sudo -E -- "$@"
   fi
+}
+
+clear_screen() {
+  if is_tty; then clear || true; fi
+}
+
+# -------------------------
+# Environment / detection
+# -------------------------
+require_repo() {
+  [[ -d "$ROOT_DIR" ]] || die "Repo root not found: $ROOT_DIR"
+  [[ -f "$NETOPT_BIN" ]] || die "Missing netopt binary: $NETOPT_BIN"
+  [[ -x "$NETOPT_BIN" ]] || log_warn "netopt is not executable yet. I will try to run it via bash if needed."
 }
 
 detect_iface() {
   local iface=""
-  iface="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
-  if [[ -n "${iface:-}" ]]; then
-    printf '%s\n' "$iface"
-    return 0
+  if have_cmd ip; then
+    iface="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+    [[ -n "${iface:-}" ]] && { printf '%s\n' "$iface"; return 0; }
+    iface="$(ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {print $2; exit}')"
+    [[ -n "${iface:-}" ]] && { printf '%s\n' "$iface"; return 0; }
   fi
-  iface="$(ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {print $2; exit}')"
-  [[ -n "${iface:-}" ]] || die "Could not detect interface. Use CLI with --iface."
-  printf '%s\n' "$iface"
+  die "Could not detect network interface. Please specify interface manually."
 }
 
-header() {
-  clear || true
-  printf '%s\n' "${c_blue}${c_bold}"
-  cat <<'EOF'
- _   _      _   ____        _   
-| \ | | ___| |_|  _ \ _   _| |_ 
-|  \| |/ _ \ __| |_) | | | | __|
-| |\  |  __/ |_|  __/| |_| | |_ 
-|_| \_|\___|\__|_|    \__,_|\__|
-EOF
-  printf '%s\n' "${c_reset}"
-  printf '%sLinux Network Optimizer%s  %s(menu)%s\n' "$c_bold" "$c_reset" "$c_dim" "$c_reset"
-  printf '%sRepo:%s %s\n' "$c_dim" "$c_reset" "$ROOT_DIR"
-  printf '\n'
-}
-
-show_quick_status() {
-  local iface cc qdisc
-  iface="$(detect_iface)"
-  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")"
-  qdisc="$(tc qdisc show dev "$iface" 2>/dev/null | head -n 1 || true)"
-
-  printf '%sQuick status%s\n' "$c_bold" "$c_reset"
-  printf '  iface: %s\n' "$iface"
-  printf '  tcp_cc: %s\n' "$cc"
-  if [[ -n "${qdisc:-}" ]]; then
-    printf '  qdisc: %s\n' "$qdisc"
+get_tcp_cc() {
+  if have_cmd sysctl; then
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown"
   else
-    printf '  qdisc: (no data)\n'
+    echo "unknown"
   fi
-  printf '\n'
 }
 
+get_qdisc_line() {
+  local iface="$1"
+  if have_cmd tc; then
+    tc qdisc show dev "$iface" 2>/dev/null | head -n 1 || true
+  else
+    echo ""
+  fi
+}
+
+get_kernel() { uname -r 2>/dev/null || echo "unknown"; }
+
+deps_summary() {
+  local missing=0
+  local must=(bash ip sysctl tc awk)
+  for c in "${must[@]}"; do
+    if ! have_cmd "$c"; then
+      log_warn "Missing dependency: $c"
+      missing=1
+    fi
+  done
+  if [[ "$missing" -eq 0 ]]; then
+    log_ok "Dependencies: OK"
+  else
+    log_warn "Some dependencies are missing; some menu features may be limited."
+  fi
+}
+
+# -------------------------
+# netopt wrapper
+# -------------------------
 run_netopt() {
-  [[ -x "$NETOPT_BIN" ]] || die "Missing executable: $NETOPT_BIN"
-  "$NETOPT_BIN" "$@"
+  require_repo
+  # Prefer direct execution
+  if [[ -x "$NETOPT_BIN" ]]; then
+    "$NETOPT_BIN" "$@"
+  else
+    # Fallback: run with bash (useful if executable bit was missing)
+    bash "$NETOPT_BIN" "$@"
+  fi
 }
 
-pick_profile() {
-  local p
-  printf '%sSelect profile:%s\n' "$c_bold" "$c_reset"
-  printf '  1) safe (recommended for first run)\n'
-  printf '  2) balanced\n'
-  printf '  3) aggressive\n'
-  read -r -p "Choice [1-3] (default 2): " p
-  case "${p:-2}" in
-    1) echo "safe" ;;
-    2) echo "balanced" ;;
-    3) echo "aggressive" ;;
-    *) echo "balanced" ;;
-  esac
+# -------------------------
+# Input (safe, UX-friendly)
+# -------------------------
+read_tty() {
+  local prompt="$1"
+  local out=""
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$prompt" out </dev/tty || true
+  else
+    read -r -p "$prompt" out || true
+  fi
+  printf '%s' "$out"
 }
 
-pick_qdisc() {
-  local q
-  printf '%sSelect qdisc:%s\n' "$c_bold" "$c_reset"
-  printf '  1) fq_codel (great general default)\n'
-  printf '  2) cake (best for fairness/latency, if available)\n'
-  printf '  3) fq (minimal)\n'
-  read -r -p "Choice [1-3] (default 1): " q
-  case "${q:-1}" in
-    1) echo "fq_codel" ;;
-    2) echo "cake" ;;
-    3) echo "fq" ;;
-    *) echo "fq_codel" ;;
+confirm() {
+  local msg="${1:-Are you sure?}"
+  local ans
+  ans="$(read_tty "$msg [y/N]: ")"
+  case "${ans,,}" in
+    y|yes) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
 pick_iface() {
   local def iface
   def="$(detect_iface)"
-  read -r -p "Interface (default: $def): " iface
-  echo "${iface:-$def}"
+  iface="$(read_tty "Interface (default: $def): ")"
+  iface="${iface:-$def}"
+  printf '%s\n' "$iface"
 }
 
+pick_profile() {
+  local choice
+  while true; do
+    printf '%sSelect profile:%s\n' "$c_bold" "$c_reset" >&2
+    printf '  1) safe       (recommended for first run)\n' >&2
+    printf '  2) balanced   (good general default)\n' >&2
+    printf '  3) aggressive (only if you know your workload)\n' >&2
+    choice="$(read_tty "Choice [1-3] (default 2): ")"
+    choice="${choice:-2}"
+    case "$choice" in
+      1) echo "safe"; return 0 ;;
+      2) echo "balanced"; return 0 ;;
+      3) echo "aggressive"; return 0 ;;
+      *) log_warn "Invalid choice. Please select 1-3." >&2 ;;
+    esac
+  done
+}
+
+pick_qdisc() {
+  local choice
+  while true; do
+    printf '%sSelect qdisc:%s\n' "$c_bold" "$c_reset" >&2
+    printf '  1) fq_codel (great general default)\n' >&2
+    printf '  2) cake     (best fairness/latency if available)\n' >&2
+    printf '  3) fq       (minimal)\n' >&2
+    choice="$(read_tty "Choice [1-3] (default 1): ")"
+    choice="${choice:-1}"
+    case "$choice" in
+      1) echo "fq_codel"; return 0 ;;
+      2) echo "cake"; return 0 ;;
+      3) echo "fq"; return 0 ;;
+      *) log_warn "Invalid choice. Please select 1-3." >&2 ;;
+    esac
+  done
+}
+
+# -------------------------
+# Rendering
+# -------------------------
+header() {
+  clear_screen
+  printf '%s\n' "${c_blue}${c_bold}"
+  cat <<'EOF'
+ _   _      _   ____        _
+| \ | | ___| |_|  _ \ _   _| |_
+|  \| |/ _ \ __| |_) | | | | __|
+| |\  |  __/ |_|  __/| |_| | |_
+|_| \_|\___|\__|_|    \__,_|\__|
+EOF
+  printf '%s\n' "${c_reset}"
+  printf '%sLinux Network Optimizer%s  %s(menu)%s\n' "$c_bold" "$c_reset" "$c_dim" "$c_reset"
+  printf '%sRepo:%s %s\n' "$c_dim" "$c_reset" "$REPO_HINT"
+  hr
+  deps_summary
+  hr
+}
+
+show_quick_status() {
+  local iface cc qdisc kernel
+  iface="$(detect_iface)"
+  cc="$(get_tcp_cc)"
+  qdisc="$(get_qdisc_line "$iface")"
+  kernel="$(get_kernel)"
+
+  title "Quick status"
+  printf '  kernel : %s\n' "$kernel"
+  printf '  iface  : %s\n' "$iface"
+  printf '  tcp_cc : %s\n' "$cc"
+  if [[ -n "${qdisc:-}" ]]; then
+    printf '  qdisc  : %s\n' "$qdisc"
+  else
+    printf '  qdisc  : (no data)\n'
+  fi
+  hr
+}
+
+menu_print() {
+  title "Choose an action"
+  cat <<EOF
+  1) Run checks (diagnose)
+  2) Apply tuning (profile + qdisc)   ${c_dim}[requires sudo]${c_reset}
+  3) Show current qdisc
+  4) List backups
+  5) Rollback (latest backup)        ${c_dim}[requires sudo]${c_reset}
+  6) Show snapshot (sysctl/qdisc via CLI)
+  0) Exit
+EOF
+  printf '\n'
+}
+
+# -------------------------
+# Actions
+# -------------------------
+action_checks() {
+  log_info "Running checks..."
+  run_netopt check
+  log_ok "Checks completed."
+}
+
+action_apply() {
+  local iface profile qdisc
+  iface="$(pick_iface)"
+  profile="$(pick_profile)"
+  qdisc="$(pick_qdisc)"
+
+  hr
+  log_info "Planned apply:"
+  printf '  iface   : %s\n' "$iface"
+  printf '  profile : %s\n' "$profile"
+  printf '  qdisc   : %s\n' "$qdisc"
+  hr
+
+  if ! confirm "Proceed to APPLY these changes?"; then
+    log_warn "Apply cancelled."
+    return 0
+  fi
+
+  log_info "Applying tuning (requires sudo)..."
+  run_root "$NETOPT_BIN" apply --profile "$profile" --qdisc "$qdisc" --iface "$iface"
+  log_ok "Apply completed."
+}
+
+action_show_qdisc() {
+  local iface
+  iface="$(pick_iface)"
+  hr
+  if have_cmd tc; then
+    tc qdisc show dev "$iface" || true
+  else
+    log_warn "tc not found."
+  fi
+  hr
+}
+
+action_backups() {
+  hr
+  run_netopt backups
+  hr
+}
+
+action_rollback_latest() {
+  hr
+  log_warn "Rollback will revert sysctl/qdisc changes from the latest backup."
+  if ! confirm "Proceed to ROLLBACK latest backup?"; then
+    log_warn "Rollback cancelled."
+    return 0
+  fi
+  log_info "Rolling back (requires sudo)..."
+  run_root "$NETOPT_BIN" rollback --latest
+  log_ok "Rollback completed."
+}
+
+action_snapshot() {
+  hr
+  run_netopt qdisc show
+  hr
+}
+
+# -------------------------
+# Main loop
+# -------------------------
 menu_loop() {
   while true; do
     header
     show_quick_status
+    menu_print
 
-    printf '%sChoose an action:%s\n' "$c_bold" "$c_reset"
-    printf '  1) Run checks (diagnose)\n'
-    printf '  2) Apply tuning (profile + qdisc)\n'
-    printf '  3) Show current qdisc\n'
-    printf '  4) List backups\n'
-    printf '  5) Rollback (latest backup)\n'
-    printf '  6) Show current sysctl/qdisc snapshot (via CLI)\n'
-    printf '  0) Exit\n\n'
-
-    read -r -p "Enter choice [0-6]: " choice
+    local choice
+    choice="$(read_tty "Enter choice [0-6]: ")"
     case "${choice:-}" in
-      1)
-        printf '\n%sRunning checks...%s\n\n' "$c_green" "$c_reset"
-        run_netopt check
-        printf '\n%sOK%s\n' "$c_green" "$c_reset"
-        pause
-        ;;
-      2)
-        local profile qdisc iface
-        iface="$(pick_iface)"
-        profile="$(pick_profile)"
-        qdisc="$(pick_qdisc)"
-        printf '\n%sApplying:%s iface=%s profile=%s qdisc=%s\n\n' "$c_yellow" "$c_reset" "$iface" "$profile" "$qdisc"
-        run_netopt apply --profile "$profile" --qdisc "$qdisc" --iface "$iface"
-        printf '\n%sApply completed.%s\n' "$c_green" "$c_reset"
-        pause
-        ;;
-      3)
-        local iface
-        iface="$(pick_iface)"
-        printf '\n'
-        tc qdisc show dev "$iface" || true
-        printf '\n'
-        pause
-        ;;
-      4)
-        printf '\n'
-        run_netopt backups
-        printf '\n'
-        pause
-        ;;
-      5)
-        printf '\n%sRolling back latest backup...%s\n\n' "$c_yellow" "$c_reset"
-        run_netopt rollback --latest
-        printf '\n%sRollback completed.%s\n' "$c_green" "$c_reset"
-        pause
-        ;;
-      6)
-        printf '\n'
-        run_netopt qdisc show
-        printf '\n'
-        pause
-        ;;
-      0)
-        exit 0
-        ;;
-      *)
-        printf '\n%sInvalid choice.%s\n' "$c_red" "$c_reset"
-        pause
-        ;;
+      1) action_checks; pause ;;
+      2) action_apply; pause ;;
+      3) action_show_qdisc; pause ;;
+      4) action_backups; pause ;;
+      5) action_rollback_latest; pause ;;
+      6) action_snapshot; pause ;;
+      0) exit 0 ;;
+      *) log_err "Invalid choice."; pause ;;
     esac
   done
 }
 
 main() {
-  ensure_root
+  # Do not force sudo on startup: only apply/rollback need it.
+  require_repo
   menu_loop
 }
 
