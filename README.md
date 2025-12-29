@@ -1,28 +1,28 @@
 # NetOpt
 
-A professional, **safe-by-default** Linux network optimization toolkit designed for servers that handle many concurrent client connections (e.g., VPN/proxy, APIs, WebSocket, game backends).
+NetOpt is a professional, **safe-by-default** Linux network optimization toolkit for servers that must sustain **many concurrent client connections** (e.g., VPN/proxy nodes, APIs, WebSockets, game backends).
 
-NetOpt ships a single CLI (`netopt`) that:
+It ships a single CLI (`netopt`) that:
 
-- Performs **pre-checks** (kernel, NIC offloads, qdisc, congestion control, queue sizes)
-- Applies conservative kernel networking tunings via an `/etc/sysctl.d` drop-in
+- Runs **pre-checks** (kernel, qdisc, congestion control, queue sizes; plus optional NIC offload reporting)
+- Applies conservative Linux network tunings via an `/etc/sysctl.d` drop-in
 - Optionally configures a modern egress qdisc (**FQ-CoDel** by default; **CAKE** optional)
-- Creates a **backup** before any change, and supports a clean **rollback**
-- Is **idempotent**: re-running it won't stack duplicate rules/settings
+- Creates a **backup** before any change and supports a clean **rollback**
+- Is **idempotent**: re-running it does not stack duplicate settings or rules
 
-> Important: NetOpt is not a magic “speed booster”. Your iperf results show heavy TCP retransmissions and unstable throughput with multiple parallel streams — that usually points to **loss/reordering/queueing** somewhere on the path. This tool focuses on _server-side hygiene_ and _bufferbloat control_. If the upstream network is congested or lossy, total throughput may remain limited.
+> Important: NetOpt is not a magic “speed booster”. If you see heavy TCP retransmissions and unstable throughput under parallel streams, the root cause is often **loss / reordering / congestion / queueing** somewhere on the path. NetOpt focuses on _server-side hygiene_ and _bufferbloat control_. If the upstream network is congested or lossy, total throughput may remain limited.
 
-## What NetOpt is good for
+## When NetOpt helps
 
-- Many concurrent connections (hundreds to tens of thousands)
-- Better latency and fairness under load (less “one client destroys everyone”)
-- Smoother throughput when the server is busy
+- High concurrency (hundreds to tens of thousands of sockets)
+- Better latency and fairness under load (reduces “one client destroys everyone” behavior)
+- More stable throughput when the server is busy
 
-## What NetOpt will NOT fix
+## When NetOpt will not help
 
-- Bad upstream routing/peering
-- ISP or datacenter congestion
-- Faulty cabling / NIC / virtualization host issues
+- Bad routing/peering upstream
+- ISP / datacenter congestion
+- Faulty cabling, NIC issues, virtualization host bottlenecks
 - DDoS / abusive clients (you still need firewall/rate-limit policies)
 
 ## Quick start
@@ -45,7 +45,7 @@ sudo ./bin/netopt apply --profile safe
 sudo ./bin/netopt qdisc set --mode cake
 ```
 
-### 4) Rollback to previous state
+### 4) Roll back to previous state
 
 ```bash
 sudo ./bin/netopt rollback
@@ -53,37 +53,56 @@ sudo ./bin/netopt rollback
 
 ## Profiles
 
-- `safe` (default): conservative kernel tuning; minimal risk; no “aggressive” timeouts.
-- `balanced`: slightly more tuning for busy servers; still reasonable defaults.
-- `aggressive`: only for advanced operators (not recommended without measurement).
+NetOpt exposes profiles to keep changes understandable and reviewable:
 
-## What gets changed
+- `safe` (default): conservative kernel tuning; minimal risk; avoids aggressive timeouts.
+- `balanced`: additional tuning for busy servers; still within broadly safe defaults.
+- `aggressive`: for advanced operators only (not recommended without measurement and rollback plan).
 
-NetOpt touches:
+**Operational guidance**
 
-1. **sysctl drop-in**
+- Start with `safe`.
+- Measure.
+- Only then consider moving to `balanced`.
+- Use `aggressive` only when you fully understand the trade-offs and have a reproducible benchmark.
 
-   - Writes `/etc/sysctl.d/99-netopt.conf`
-   - Applies via `sysctl --system`
+## What NetOpt changes
 
-2. **qdisc (traffic control)**
+NetOpt may touch the following components (depending on which subcommands you use):
 
-   - Sets `fq_codel` (default) on a selected interface, or `cake` if requested
-   - Records previous qdisc so rollback can restore
+### 1) Sysctl drop-in
 
-3. **optional checks-only guidance**
-   - NIC offload hints (NetOpt reports; does not disable by default)
+- Writes: `/etc/sysctl.d/99-netopt.conf`
+- Applies via: `sysctl --system`
 
-## Safety model (backup & rollback)
+This approach is:
+
+- **Auditable** (single, explicit file)
+- **Reversible** (remove file + restore previous values)
+- **Compatible** with distro defaults and other drop-ins (predictable order)
+
+### 2) Qdisc (Traffic Control)
+
+- Sets `fq_codel` by default on the selected interface, or `cake` if requested
+- Records the previous qdisc state so rollback can restore it
+
+> Note: CAKE is most effective when the server is the actual **bottleneck** (edge link) and you can control egress behavior meaningfully. If your server is not the bottleneck, CAKE may not improve throughput—and can sometimes reduce peak throughput in exchange for better latency/fairness.
+
+### 3) Checks-only guidance
+
+- Reports relevant NIC offload state (via `ethtool` when available)
+- Provides hints; does **not** disable offloads by default (to avoid surprising production impact)
+
+## Safety model: backup & rollback
 
 Before any change, NetOpt creates a timestamped backup under:
 
 - `/var/lib/netopt/backups/<timestamp>/`
 
-It stores:
+Backups include:
 
-- The previous qdisc config (`tc qdisc show ...`)
-- The relevant sysctl keys and current values
+- Prior qdisc configuration (`tc qdisc show ...`)
+- Relevant sysctl keys and their current values (captured at apply-time)
 
 Rollback will:
 
@@ -91,34 +110,88 @@ Rollback will:
 - Restore previous sysctl values
 - Restore previous qdisc (or delete qdisc if none existed)
 
+**Recommendation:** Treat `rollback` as part of your change procedure—run it once on a non-production environment to validate reversibility before production rollout.
+
 ## Supported systems
 
-- Ubuntu / Debian (modern kernels)
-- Most other Linux distributions may work, but are not primary targets
+Primary targets:
 
-Required tools:
+- Ubuntu / Debian on modern kernels
+
+May work on other Linux distributions, but they are not the primary test targets.
+
+### Required tools
 
 - `ip`, `tc` (iproute2)
 - `sysctl`
-- `ethtool` (optional, for reporting NIC offloads)
 
-## Suggested validation
+Optional (for improved reporting):
 
-After applying `safe`:
+- `ethtool`
 
-1. Run a consistent test (same target, same time window):
-   ```bash
-   iperf3 -c <server_ip> -p <port> -t 30 -R
-   iperf3 -c <server_ip> -p <port> -t 30 -R -P 2
-   ```
-2. Monitor retransmits and drops:
-   ```bash
-   ss -s
-   netstat -s | egrep -i 'retran|segments retransmited|timeout|reset' | head -n 80
-   tc -s qdisc show dev <iface>
-   ```
+## Suggested validation workflow
 
-If throughput improves but latency under load is still bad, consider CAKE **only if** your server is the bottleneck link.
+After applying `safe`, validate with a consistent test methodology.
+
+### 1) Throughput tests (consistent target and window)
+
+```bash
+iperf3 -c <server_ip> -p <port> -t 30 -R
+iperf3 -c <server_ip> -p <port> -t 30 -R -P 2
+```
+
+If you care about concurrency behavior, also test with higher parallelism (e.g., `-P 8`, `-P 16`) and observe stability.
+
+### 2) Retransmits, drops, and queue stats
+
+```bash
+ss -s
+netstat -s | egrep -i 'retran|segments retransmited|timeout|reset' | head -n 80
+tc -s qdisc show dev <iface>
+```
+
+### 3) Interpret results (practical heuristics)
+
+- **Retransmits rising sharply** under load:
+
+  - Often indicates upstream loss/congestion, MTU/PMTUD issues, or path instability.
+
+- **Latency spikes with stable throughput**:
+
+  - Bufferbloat is likely; FQ-CoDel/CAKE can help.
+
+- **Throughput drops but latency improves** after enabling CAKE:
+
+  - That trade-off can be expected when shaping; confirm the server is truly the bottleneck.
+
+## Troubleshooting notes
+
+- If `tc` operations fail:
+
+  - Ensure `iproute2` is installed and the kernel supports the selected qdisc.
+
+- If results worsen after applying:
+
+  - Roll back immediately:
+
+    ```bash
+    sudo ./bin/netopt rollback
+    ```
+
+  - Then re-run:
+
+    ```bash
+    sudo ./bin/netopt check
+    ```
+
+  - Compare before/after metrics (qdisc stats, retransmits, CPU, IRQ load).
+
+## Design principles
+
+- **Safe by default**: conservative tunings first; no surprise destructive actions
+- **Idempotent**: repeated runs do not stack duplicate configuration
+- **Reversible**: every apply has a corresponding rollback path
+- **Operator-friendly**: visibility via checks and explicit on-disk artifacts
 
 ## License
 
