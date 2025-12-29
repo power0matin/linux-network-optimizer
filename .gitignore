@@ -1,0 +1,8 @@
+# NetOpt
+*.log
+*.tmp
+*.swp
+.DS_Store
+.vscode/
+.idea/
+dist/

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# shellcheck source=lib/common.sh
+source "$ROOT_DIR/lib/common.sh"
+# shellcheck source=lib/checks.sh
+source "$ROOT_DIR/lib/checks.sh"
+# shellcheck source=lib/apply.sh
+source "$ROOT_DIR/lib/apply.sh"
+# shellcheck source=lib/rollback.sh
+source "$ROOT_DIR/lib/rollback.sh"
+# shellcheck source=lib/qdisc.sh
+source "$ROOT_DIR/lib/qdisc.sh"
+
+usage() {
+  cat <<'EOF'
+netopt - Linux network optimization toolkit (safe by default)
+
+Usage:
+  netopt check [--iface IFACE]
+  netopt apply [--profile safe|balanced|aggressive] [--iface IFACE] [--qdisc fq_codel|cake]
+  netopt rollback [--iface IFACE]
+  netopt backups
+  netopt qdisc show [--iface IFACE]
+  netopt qdisc set --mode fq_codel|cake [--iface IFACE]
+
+Examples:
+  sudo netopt check
+  sudo netopt apply --profile safe --qdisc fq_codel
+  sudo netopt qdisc set --mode cake
+  sudo netopt rollback
+
+Notes:
+- 'apply' always creates a backup under /var/lib/netopt/backups/<timestamp>/.
+- 'rollback' uses /var/lib/netopt/current (latest applied run).
+EOF
+}
+
+parse_arg() {
+  local key="$1"; shift
+  local val="${1:-}"
+  if [[ -z "$val" || "$val" == --* ]]; then
+    die "Missing value for $key"
+  fi
+  echo "$val"
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+
+  local iface=""
+  local profile="safe"
+  local qdisc_mode="fq_codel"
+  local mode=""
+
+  case "$cmd" in
+    ""|-h|--help|help)
+      usage
+      exit 0
+      ;;
+    check)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+          *) die "Unknown argument for check: $1" ;;
+        esac
+      done
+      run_checks "$iface"
+      ;;
+    apply)
+      ensure_root
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --profile) profile="$(parse_arg --profile "$2")"; shift 2 ;;
+          --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+          --qdisc) qdisc_mode="$(parse_arg --qdisc "$2")"; shift 2 ;;
+          *) die "Unknown argument for apply: $1" ;;
+        esac
+      done
+      apply_profile "$profile" "$iface" "$qdisc_mode" >/dev/null
+      ;;
+    rollback)
+      ensure_root
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+          *) die "Unknown argument for rollback: $1" ;;
+        esac
+      done
+      rollback_latest "$iface"
+      ;;
+    backups)
+      list_backups
+      ;;
+    qdisc)
+      sub="${1:-}"; shift || true
+      case "$sub" in
+        show)
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+              *) die "Unknown argument for qdisc show: $1" ;;
+            esac
+          done
+          [[ -n "${iface:-}" ]] || iface="$(detect_default_iface)"
+          qdisc_show "$iface"
+          ;;
+        set)
+          ensure_root
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --mode) mode="$(parse_arg --mode "$2")"; shift 2 ;;
+              --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+              *) die "Unknown argument for qdisc set: $1" ;;
+            esac
+          done
+          [[ -n "${iface:-}" ]] || iface="$(detect_default_iface)"
+          [[ -n "${mode:-}" ]] || die "qdisc set requires --mode fq_codel|cake"
+          local bdir; bdir="$(backup_begin)"
+          qdisc_set "$iface" "$mode" "$bdir"
+          ;;
+        *)
+          die "Unknown qdisc subcommand: $sub (use: show|set)"
+          ;;
+      esac
+      ;;
+    *)
+      die "Unknown command: $cmd. Use --help."
+      ;;
+  esac
+}
+
+main "$@"
