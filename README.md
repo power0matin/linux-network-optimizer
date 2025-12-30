@@ -1,127 +1,82 @@
 # NetOpt
 
-NetOpt is a professional, **safe-by-default** Linux network optimization toolkit for servers that must sustain **many concurrent client connections** (e.g., VPN/proxy nodes, APIs, WebSockets, game backends).
+> A safe-by-default Linux network optimization toolkit for high-concurrency servers (VPN/Proxy, APIs, WebSockets, game backends).
+
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Shell](https://img.shields.io/badge/Made%20with-Bash-1f425f.svg)](#)
+
+**Quick links:** [Installation](#installation) · [Quickstart](#quickstart) · [Usage](#usage) · [Safety--rollback](#safety--rollback) · [Development](#development) · [Contributing](#contributing) · [Security](#security) · [License](#license) · [Contact](#-contact)
+
+## Overview
+
+NetOpt helps you apply **conservative, auditable, and reversible** Linux networking improvements on servers that must handle **many concurrent TCP/UDP connections**.
 
 It ships a single CLI (`netopt`) that:
 
-- Runs **pre-checks** (kernel, qdisc, congestion control, queue sizes; plus optional NIC offload reporting)
-- Applies conservative Linux network tunings via an `/etc/sysctl.d` drop-in
+- Runs **pre-checks** (kernel, qdisc, congestion control, queue sizes; optional NIC offload reporting)
+- Applies safe kernel tunings via an `/etc/sysctl.d` drop-in
 - Optionally configures a modern egress qdisc (**FQ-CoDel** by default; **CAKE** optional)
 - Creates a **backup** before any change and supports a clean **rollback**
-- Is **idempotent**: re-running it does not stack duplicate settings or rules
+- Is **idempotent**: re-running does not stack duplicate configuration
 
-> Important: NetOpt is not a magic “speed booster”. If you see heavy TCP retransmissions and unstable throughput under parallel streams, the root cause is often **loss / reordering / congestion / queueing** somewhere on the path. NetOpt focuses on _server-side hygiene_ and _bufferbloat control_. If the upstream network is congested or lossy, total throughput may remain limited.
+> Important: NetOpt is not a magic “speed booster”.
+> If you see heavy TCP retransmissions and unstable throughput under parallel streams, the root cause is often **loss / reordering / congestion / queueing** somewhere on the path.
+> NetOpt focuses on _server-side hygiene_ and _bufferbloat control_. If upstream is congested or lossy, total throughput may remain limited.
 
-## When NetOpt helps
+### Non-goals (what NetOpt will NOT fix)
 
-- High concurrency (hundreds to tens of thousands of sockets)
-- Better latency and fairness under load (reduces “one client destroys everyone” behavior)
-- More stable throughput when the server is busy
-
-## When NetOpt will not help
-
-- Bad routing/peering upstream
+- Bad upstream routing/peering
 - ISP / datacenter congestion
-- Faulty cabling, NIC issues, virtualization host bottlenecks
+- Faulty cabling, NIC problems, virtualization host bottlenecks
 - DDoS / abusive clients (you still need firewall/rate-limit policies)
 
-## Quick start
+## Features
 
-### 1) Inspect current state (no changes)
+**Core**
 
-```bash
-sudo ./bin/netopt check
-```
+- Safe sysctl tuning via a single drop-in file (`/etc/sysctl.d/99-netopt.conf`)
+- Pre-checks for common misconfigurations
+- Backup + rollback for every apply
+- Idempotent changes (re-run safe)
 
-### 2) Apply safe profile (recommended first step)
+**Advanced**
 
-```bash
-sudo ./bin/netopt apply --profile safe
-```
+- Egress qdisc: `fq_codel` (default) or `cake` (optional)
+- Optional reporting of NIC offloads (`ethtool`) and queueing hints
 
-### 3) Optionally enable CAKE (only if the server is an edge bottleneck)
+## Table of Contents
 
-```bash
-sudo ./bin/netopt qdisc set --mode cake
-```
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Security notes (curl|bash)](#security-notes-curlbash)
+- [Quickstart](#quickstart)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Safety & rollback](#safety--rollback)
+- [Troubleshooting](#troubleshooting)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Testing](#testing)
+- [Roadmap](#roadmap)
+- [Changelog](#changelog)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+- [📬 Contact](#-contact)
 
-### 4) Roll back to previous state
+## Requirements
 
-```bash
-sudo ./bin/netopt rollback
-```
-
-## Profiles
-
-NetOpt exposes profiles to keep changes understandable and reviewable:
-
-- `safe` (default): conservative kernel tuning; minimal risk; avoids aggressive timeouts.
-- `balanced`: additional tuning for busy servers; still within broadly safe defaults.
-- `aggressive`: for advanced operators only (not recommended without measurement and rollback plan).
-
-**Operational guidance**
-
-- Start with `safe`.
-- Measure.
-- Only then consider moving to `balanced`.
-- Use `aggressive` only when you fully understand the trade-offs and have a reproducible benchmark.
-
-## What NetOpt changes
-
-NetOpt may touch the following components (depending on which subcommands you use):
-
-### 1) Sysctl drop-in
-
-- Writes: `/etc/sysctl.d/99-netopt.conf`
-- Applies via: `sysctl --system`
-
-This approach is:
-
-- **Auditable** (single, explicit file)
-- **Reversible** (remove file + restore previous values)
-- **Compatible** with distro defaults and other drop-ins (predictable order)
-
-### 2) Qdisc (Traffic Control)
-
-- Sets `fq_codel` by default on the selected interface, or `cake` if requested
-- Records the previous qdisc state so rollback can restore it
-
-> Note: CAKE is most effective when the server is the actual **bottleneck** (edge link) and you can control egress behavior meaningfully. If your server is not the bottleneck, CAKE may not improve throughput—and can sometimes reduce peak throughput in exchange for better latency/fairness.
-
-### 3) Checks-only guidance
-
-- Reports relevant NIC offload state (via `ethtool` when available)
-- Provides hints; does **not** disable offloads by default (to avoid surprising production impact)
-
-## Safety model: backup & rollback
-
-Before any change, NetOpt creates a timestamped backup under:
-
-- `/var/lib/netopt/backups/<timestamp>/`
-
-Backups include:
-
-- Prior qdisc configuration (`tc qdisc show ...`)
-- Relevant sysctl keys and their current values (captured at apply-time)
-
-Rollback will:
-
-- Remove `/etc/sysctl.d/99-netopt.conf`
-- Restore previous sysctl values
-- Restore previous qdisc (or delete qdisc if none existed)
-
-**Recommendation:** Treat `rollback` as part of your change procedure—run it once on a non-production environment to validate reversibility before production rollout.
-
-## Supported systems
+### Supported systems
 
 Primary targets:
 
 - Ubuntu / Debian on modern kernels
 
-May work on other Linux distributions, but they are not the primary test targets.
+May work on other Linux distributions, but they are not primary test targets.
 
 ### Required tools
 
+- `bash`
 - `ip`, `tc` (iproute2)
 - `sysctl`
 
@@ -129,7 +84,198 @@ Optional (for improved reporting):
 
 - `ethtool`
 
-## Suggested validation workflow
+## Installation
+
+### Option A) One-liner (quickest)
+
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/power0matin/linux-network-optimizer/main/netopt.sh)
+```
+
+### Option B) Clone & run (recommended for production)
+
+```bash
+git clone https://github.com/power0matin/linux-network-optimizer.git
+cd linux-network-optimizer
+sudo bash ./netopt.sh
+```
+
+> If your repo layout includes `./bin/netopt`, you can use the CLI directly after installation (see below).
+
+## Security notes (curl|bash)
+
+Running a remote script as root is fast but reduces auditability.
+
+Recommended production workflow:
+
+1. Download:
+
+   ```bash
+   curl -fsSL -o netopt.sh \
+     https://raw.githubusercontent.com/power0matin/linux-network-optimizer/main/netopt.sh
+   ```
+
+2. Inspect:
+
+   ```bash
+   less netopt.sh
+   ```
+
+3. (Optional) Pin to a specific commit for reproducibility:
+
+   ```bash
+   curl -fsSL -o netopt.sh \
+     https://raw.githubusercontent.com/power0matin/linux-network-optimizer/<COMMIT_SHA>/netopt.sh
+   ```
+
+4. Execute:
+
+   ```bash
+   sudo bash netopt.sh
+   ```
+
+## Quickstart
+
+### 1) Inspect current state (no changes)
+
+```bash
+sudo ./bin/netopt check
+```
+
+Expected outcome:
+
+- A readable report of kernel/networking state and recommendations
+- No system changes
+
+### 2) Apply safe profile (recommended first step)
+
+```bash
+sudo ./bin/netopt apply --profile safe
+```
+
+Expected outcome:
+
+- `/etc/sysctl.d/99-netopt.conf` written
+- `sysctl --system` applied
+- Backup created under `/var/lib/netopt/backups/<timestamp>/`
+
+### 3) Optionally set CAKE (only if server is the edge bottleneck)
+
+```bash
+sudo ./bin/netopt qdisc set --mode cake
+```
+
+Expected outcome:
+
+- qdisc configured on the selected egress interface
+- previous qdisc state captured for rollback
+
+### 4) Roll back to previous state
+
+```bash
+sudo ./bin/netopt rollback
+```
+
+Expected outcome:
+
+- sysctl drop-in removed (if created by NetOpt)
+- prior sysctl values restored
+- prior qdisc restored (or removed if none existed)
+
+## Configuration
+
+NetOpt uses explicit on-disk artifacts to remain auditable and reversible.
+
+### Files and paths
+
+- Sysctl drop-in:
+
+  - `/etc/sysctl.d/99-netopt.conf`
+
+- Backups:
+
+  - `/var/lib/netopt/backups/<timestamp>/`
+
+> Notes:
+>
+> - Exact keys and values are defined by the selected profile.
+> - Backups capture the previous values at apply-time.
+
+### Interface selection (qdisc)
+
+If your server has multiple interfaces, choose the correct egress interface:
+
+```bash
+ip route get 1.1.1.1
+ip -br link
+```
+
+Then apply qdisc on a specific interface (example `eth0`):
+
+```bash
+sudo ./bin/netopt qdisc set --dev eth0 --mode fq_codel
+# or
+sudo ./bin/netopt qdisc set --dev eth0 --mode cake
+```
+
+## Usage
+
+### Common workflows
+
+**Baseline assessment (no changes)**
+
+```bash
+sudo ./bin/netopt check
+```
+
+**Apply conservative tuning**
+
+```bash
+sudo ./bin/netopt apply --profile safe
+```
+
+**If you are the bottleneck and want better latency under load**
+
+```bash
+sudo ./bin/netopt qdisc set --dev eth0 --mode fq_codel
+```
+
+**Try CAKE only when the server is truly the edge bottleneck**
+
+```bash
+sudo ./bin/netopt qdisc set --dev eth0 --mode cake
+```
+
+**Undo changes**
+
+```bash
+sudo ./bin/netopt rollback
+```
+
+## Safety & rollback
+
+NetOpt follows a “change with escape hatch” model.
+
+Before any change, it creates a timestamped backup under:
+
+- `/var/lib/netopt/backups/<timestamp>/`
+
+Backups include:
+
+- Prior qdisc configuration (`tc qdisc show ...`)
+- Relevant sysctl keys and their values (captured at apply-time)
+
+Rollback will:
+
+- Remove `/etc/sysctl.d/99-netopt.conf`
+- Restore prior sysctl values
+- Restore prior qdisc (or delete qdisc if none existed)
+
+Recommendation:
+
+- Always validate rollback on a staging server before production rollout.
+
+## Suggested validation
 
 After applying `safe`, validate with a consistent test methodology.
 
@@ -140,8 +286,6 @@ iperf3 -c <server_ip> -p <port> -t 30 -R
 iperf3 -c <server_ip> -p <port> -t 30 -R -P 2
 ```
 
-If you care about concurrency behavior, also test with higher parallelism (e.g., `-P 8`, `-P 16`) and observe stability.
-
 ### 2) Retransmits, drops, and queue stats
 
 ```bash
@@ -150,27 +294,27 @@ netstat -s | egrep -i 'retran|segments retransmited|timeout|reset' | head -n 80
 tc -s qdisc show dev <iface>
 ```
 
-### 3) Interpret results (practical heuristics)
+### 3) Practical interpretation
 
-- **Retransmits rising sharply** under load:
+- Retransmits rising sharply under load:
 
   - Often indicates upstream loss/congestion, MTU/PMTUD issues, or path instability.
 
-- **Latency spikes with stable throughput**:
+- Latency spikes with stable throughput:
 
   - Bufferbloat is likely; FQ-CoDel/CAKE can help.
 
-- **Throughput drops but latency improves** after enabling CAKE:
+- Throughput drops but latency improves after enabling CAKE:
 
-  - That trade-off can be expected when shaping; confirm the server is truly the bottleneck.
+  - Expected trade-off when shaping; confirm the server is the bottleneck.
 
-## Troubleshooting notes
+## Troubleshooting
 
-- If `tc` operations fail:
+- `tc` operations fail:
 
-  - Ensure `iproute2` is installed and the kernel supports the selected qdisc.
+  - Ensure `iproute2` is installed and kernel supports selected qdisc.
 
-- If results worsen after applying:
+- Results worsen after applying:
 
   - Roll back immediately:
 
@@ -178,21 +322,127 @@ tc -s qdisc show dev <iface>
     sudo ./bin/netopt rollback
     ```
 
-  - Then re-run:
+  - Re-check:
 
     ```bash
     sudo ./bin/netopt check
     ```
 
-  - Compare before/after metrics (qdisc stats, retransmits, CPU, IRQ load).
+## Architecture
 
-## Design principles
+### Project structure (typical)
 
-- **Safe by default**: conservative tunings first; no surprise destructive actions
-- **Idempotent**: repeated runs do not stack duplicate configuration
-- **Reversible**: every apply has a corresponding rollback path
-- **Operator-friendly**: visibility via checks and explicit on-disk artifacts
+```text
+linux-network-optimizer/
+  netopt.sh
+  bin/
+    netopt
+  README.md
+  LICENSE
+```
+
+### High-level flow
+
+```mermaid
+flowchart LR
+  A[Operator] --> B[netopt check/apply/qdisc/rollback]
+  B --> C[/etc/sysctl.d/99-netopt.conf]
+  B --> D[/var/lib/netopt/backups/]
+  B --> E[tc qdisc]
+```
+
+## Development
+
+### Local setup
+
+```bash
+git clone https://github.com/power0matin/linux-network-optimizer.git
+cd linux-network-optimizer
+```
+
+### Conventions
+
+- Keep changes reversible (every apply must have rollback logic)
+- Prefer conservative defaults; document any trade-offs
+- Use clear CLI output: what changed, where, and how to rollback
+
+### Suggested commit convention
+
+Conventional Commits:
+
+- `feat: ...`
+- `fix: ...`
+- `docs: ...`
+- `refactor: ...`
+
+## Testing
+
+At minimum, validate on:
+
+- fresh VM (Ubuntu/Debian)
+- typical VPS environment
+- (optional) container or CI smoke test
+
+Recommended checks:
+
+- `./bin/netopt check` produces output and exits 0
+- `apply --profile safe` creates sysctl file + backup
+- `rollback` returns the system to baseline
+- `qdisc set` applies expected qdisc and can rollback
+
+## Roadmap
+
+- [ ] Add CI smoke tests (lint/shellcheck + dry-run)
+- [ ] Add `--dry-run` mode for apply/qdisc
+- [ ] Expand documentation for profile keys and rationale
+- [ ] Add `docs/` with deeper networking notes
+
+## Changelog
+
+See GitHub Releases (or add a `CHANGELOG.md` if you want SemVer tracking).
+
+## Contributing
+
+Contributions are welcome.
+
+Suggested workflow:
+
+1. Fork the repo
+2. Create a feature branch: `git checkout -b feat/your-change`
+3. Make changes with clear commits
+4. Open a PR with:
+
+   - What changed
+   - Why it changed
+   - How to test
+   - Rollback impact (if any)
+
+If you add or modify tunings, please include:
+
+- Before/after measurements (iperf3 + retransmits + qdisc stats)
+- Rationale and risk notes
+
+## Security
+
+If you discover a security issue:
+
+- Please avoid opening a public issue immediately.
+- Prefer responsible disclosure via email (see Contact below).
+
+General warning:
+
+- Avoid running unreviewed remote scripts as `root` in production.
+- Prefer pinning to a commit hash and auditing changes.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
+
+## 📬 Contact
+
+**Matin Shahabadi (متین شاه‌آبادی / متین شاه آبادی)**
+
+- Website: [matinshahabadi.ir](https://matinshahabadi.ir)
+- Email: [me@matinshahabadi.ir](mailto:me@matinshahabadi.ir)
+- GitHub: [power0matin](https://github.com/power0matin)
+- LinkedIn: [matin-shahabadi](https://www.linkedin.com/in/matin-shahabadi)
