@@ -529,7 +529,7 @@ action_apply() {
     log_ok "Apply completed."
   else
     log_err "Apply failed."
-    log_err "Recommendation: run 'bin/netopt rollback --latest' to revert, or check logs/backups."
+    log_err "Recommendation: run 'bin/netopt rollback' to revert, or check logs/backups."
     return 1
   fi
 
@@ -578,7 +578,7 @@ log_info "Rolling back (requires sudo)..."
 # Pre-warm sudo before rollback (better UX)
 if ! is_root; then sudo_refresh; fi
 
-if run_netopt_root rollback --latest; then
+if run_netopt_root rollback; then
     log_ok "Rollback completed."
   else
     log_err "Rollback failed."
