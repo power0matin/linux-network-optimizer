@@ -213,9 +213,14 @@ ip -br link
 Then apply qdisc on a specific interface (example `eth0`):
 
 ```bash
-sudo ./bin/netopt qdisc set --dev eth0 --mode fq_codel
+sudo ./bin/netopt qdisc set --iface eth0 --mode fq_codel
+# or (alias)
+sudo ./bin/netopt qdisc set --iface eth0 --mode fq_codel
+
 # or
-sudo ./bin/netopt qdisc set --dev eth0 --mode cake
+sudo ./bin/netopt qdisc set --iface eth0 --mode cake
+# or (alias)
+sudo ./bin/netopt qdisc set --iface eth0 --mode cake
 ```
 
 ## Usage

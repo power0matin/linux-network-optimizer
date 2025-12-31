@@ -19,22 +19,24 @@ usage() {
 netopt - Linux network optimization toolkit (safe by default)
 
 Usage:
-  netopt check [--iface IFACE]
-  netopt apply [--profile safe|balanced|aggressive] [--iface IFACE] [--qdisc fq_codel|cake]
-  netopt rollback [--iface IFACE]
+  netopt check [--iface IFACE] [--dev IFACE]
+  netopt apply [--profile safe|balanced|aggressive] [--iface IFACE|--dev IFACE] [--qdisc fq_codel|cake] [--mode fq_codel|cake]
+  netopt rollback [--iface IFACE] [--dev IFACE]
   netopt backups
-  netopt qdisc show [--iface IFACE]
-  netopt qdisc set --mode fq_codel|cake [--iface IFACE]
+  netopt qdisc show [--iface IFACE] [--dev IFACE]
+  netopt qdisc set --mode fq_codel|cake [--iface IFACE|--dev IFACE] [--qdisc fq_codel|cake]
 
 Examples:
   sudo netopt check
   sudo netopt apply --profile safe --qdisc fq_codel
   sudo netopt qdisc set --mode cake
+  sudo netopt qdisc set --dev eth0 --mode fq_codel
   sudo netopt rollback
 
 Notes:
 - 'apply' always creates a backup under /var/lib/netopt/backups/<timestamp>/.
 - 'rollback' uses /var/lib/netopt/current (latest applied run).
+- '--dev' is an alias for '--iface'. '--qdisc' and '--mode' are accepted as aliases where applicable.
 EOF
 }
 
@@ -65,6 +67,7 @@ main() {
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+          --dev)   iface="$(parse_arg --dev "$2")"; shift 2 ;;
           *) die "Unknown argument for check: $1" ;;
         esac
       done
@@ -75,8 +78,10 @@ main() {
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --profile) profile="$(parse_arg --profile "$2")"; shift 2 ;;
-          --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
-          --qdisc) qdisc_mode="$(parse_arg --qdisc "$2")"; shift 2 ;;
+          --iface)   iface="$(parse_arg --iface "$2")"; shift 2 ;;
+          --dev)     iface="$(parse_arg --dev "$2")"; shift 2 ;;
+          --qdisc)   qdisc_mode="$(parse_arg --qdisc "$2")"; shift 2 ;;
+          --mode)    qdisc_mode="$(parse_arg --mode "$2")"; shift 2 ;;
           *) die "Unknown argument for apply: $1" ;;
         esac
       done
@@ -87,13 +92,11 @@ main() {
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+          --dev)   iface="$(parse_arg --dev "$2")"; shift 2 ;;
           *) die "Unknown argument for rollback: $1" ;;
         esac
       done
       rollback_latest "$iface"
-      ;;
-    backups)
-      list_backups
       ;;
     qdisc)
       sub="${1:-}"; shift || true
@@ -102,6 +105,7 @@ main() {
           while [[ $# -gt 0 ]]; do
             case "$1" in
               --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+              --dev)   iface="$(parse_arg --dev "$2")"; shift 2 ;;
               *) die "Unknown argument for qdisc show: $1" ;;
             esac
           done
@@ -112,8 +116,10 @@ main() {
           ensure_root
           while [[ $# -gt 0 ]]; do
             case "$1" in
-              --mode) mode="$(parse_arg --mode "$2")"; shift 2 ;;
+              --mode)  mode="$(parse_arg --mode "$2")"; shift 2 ;;
+              --qdisc) mode="$(parse_arg --qdisc "$2")"; shift 2 ;;
               --iface) iface="$(parse_arg --iface "$2")"; shift 2 ;;
+              --dev)   iface="$(parse_arg --dev "$2")"; shift 2 ;;
               *) die "Unknown argument for qdisc set: $1" ;;
             esac
           done

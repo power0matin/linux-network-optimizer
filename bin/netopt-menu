@@ -6,7 +6,18 @@ set -Euo pipefail
 # Critical failures are handled in apply/rollback paths explicitly.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NETOPT_BIN="$ROOT_DIR/bin/netopt"
+
+# Support both layouts:
+# - repo/bin/netopt (installed layout)
+# - repo/netopt     (dev or flattened snapshot)
+if [[ -f "$ROOT_DIR/bin/netopt" ]]; then
+  NETOPT_BIN="$ROOT_DIR/bin/netopt"
+elif [[ -f "$ROOT_DIR/netopt" ]]; then
+  NETOPT_BIN="$ROOT_DIR/netopt"
+else
+  NETOPT_BIN="$ROOT_DIR/bin/netopt"
+fi
+
 REPO_HINT="$ROOT_DIR"
 
 # Branding

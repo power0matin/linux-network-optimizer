@@ -5,6 +5,8 @@ set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 # shellcheck source=lib/qdisc.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/qdisc.sh"
+# shellcheck source=lib/rollback.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/rollback.sh"
 
 sysctl_profile_safe() {
   cat <<'EOF'
@@ -86,6 +88,8 @@ net.ipv4.tcp_fin_timeout = 10
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_timestamps = 1
 
 net.ipv4.ip_local_port_range = 10240 65535
 
@@ -100,6 +104,8 @@ apply_profile() {
   need_cmd sysctl
   need_cmd ip
   need_cmd tc
+  need_cmd awk
+  need_cmd sort
 
   local profile="$1"
   local iface="${2:-}"
@@ -109,41 +115,50 @@ apply_profile() {
     iface="$(detect_default_iface)"
   fi
 
-  local bdir; bdir="$(backup_begin)"
-  info "Backup directory: $bdir"
-
-  # Save sysctl snapshot for keys we touch
-  backup_sysctl_keys "$bdir" \
-    net.core.netdev_max_backlog \
-    net.core.somaxconn \
-    net.ipv4.tcp_max_syn_backlog \
-    net.core.rmem_max \
-    net.core.wmem_max \
-    net.ipv4.tcp_rmem \
-    net.ipv4.tcp_wmem \
-    net.ipv4.tcp_fin_timeout \
-    net.ipv4.tcp_tw_reuse \
-    net.ipv4.tcp_syncookies \
-    net.ipv4.tcp_mtu_probing \
-    net.ipv4.tcp_sack \
-    net.ipv4.tcp_timestamps \
-    net.ipv4.ip_local_port_range \
-    net.ipv4.tcp_keepalive_time \
-    net.ipv4.tcp_keepalive_intvl \
-    net.ipv4.tcp_keepalive_probes
-
-  # Apply sysctl drop-in
+  # Render selected sysctl content first (source of truth)
   local content=""
   case "$profile" in
-    safe) content="$(sysctl_profile_safe)" ;;
-    balanced) content="$(sysctl_profile_balanced)" ;;
+    safe)       content="$(sysctl_profile_safe)" ;;
+    balanced)   content="$(sysctl_profile_balanced)" ;;
     aggressive) content="$(sysctl_profile_aggressive)" ;;
     *) die "Unknown profile: $profile (safe|balanced|aggressive)" ;;
   esac
-  write_sysctl_dropin "$content"
 
-  # Apply qdisc
-  qdisc_set "$iface" "$qdisc_mode" "$bdir"
+  local bdir; bdir="$(backup_begin)"
+  info "Backup directory: $bdir"
+
+  # Derive sysctl keys from the actual profile content to avoid backup drift
+  local -a keys=()
+  mapfile -t keys < <(
+    printf '%s\n' "$content" \
+      | awk -F'=' '
+          /^[[:space:]]*#/ { next }
+          /^[[:space:]]*$/ { next }
+          /^[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*=/ {
+            k=$1
+            gsub(/[[:space:]]+/, "", k)
+            print k
+          }' \
+      | sort -u
+  )
+
+  if ((${#keys[@]} > 0)); then
+    backup_sysctl_keys "$bdir" "${keys[@]}"
+  else
+    info "No sysctl keys detected in profile content; skipping sysctl snapshot."
+  fi
+
+  if ! write_sysctl_dropin "$content"; then
+    info "Failed to write/apply sysctl drop-in. Attempting rollback..."
+    rollback_latest "$iface" || true
+    return 1
+  fi
+
+  if ! qdisc_set "$iface" "$qdisc_mode" "$bdir"; then
+    info "Failed to apply qdisc. Attempting rollback..."
+    rollback_latest "$iface" || true
+    return 1
+  fi
 
   info "Apply completed."
   echo "$bdir"
