@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -Eeuo pipefail
+
 
 # shellcheck source=lib/common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
